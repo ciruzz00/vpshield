@@ -1,0 +1,28 @@
+# build output
+/dist/
+/vpshield
+*.test
+*.out
+coverage.*
+
+# go workspace
+go.work
+go.work.sum
+
+# secrets / local config
+.env
+.env.*
+*.pem
+*.key
+*.token
+secrets/
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# local tooling
+.claude/
