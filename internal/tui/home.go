@@ -14,6 +14,7 @@ import (
 	"vpshield/internal/sysctl"
 	"vpshield/internal/system"
 	"vpshield/internal/updates"
+	"vpshield/internal/users"
 )
 
 type dashData struct {
@@ -31,6 +32,9 @@ type dashData struct {
 	kernOK    int
 	kernTotal int
 	deadman   *system.Deadman
+	accounts  users.Summary
+	backupOK  bool
+	backupMsg string
 	loadedAt  time.Time
 }
 
@@ -77,6 +81,8 @@ func loadDash(c *ctx) tea.Cmd {
 			}
 		}
 		d.deadman = system.ActiveDeadman()
+		d.accounts = users.Summarize(users.List())
+		d.backupOK, d.backupMsg = backupDash()
 		d.loadedAt = time.Now()
 		return dashMsg{d}
 	}
@@ -94,6 +100,7 @@ func newHome(c *ctx) *homeScreen {
 	m := newMenu(c, "home",
 		menuItem{label: "Firewall & ports", desc: "default deny, open/close ports, rate limiting", action: func() tea.Cmd { return push(firewallMenu(c)) }},
 		menuItem{label: "SSH", desc: "change port, hardening, authorized keys", action: func() tea.Cmd { return push(sshMenu(c)) }},
+		menuItem{label: "Users & access", desc: "admin user instead of root, sudo policy, lock accounts", action: func() tea.Cmd { return push(usersMenu(c)) }},
 		menuItem{label: "Fail2ban", desc: "wizard, jails, banned IPs, unban", action: func() tea.Cmd { return push(f2bMenu(c)) }},
 		menuItem{label: "Banners & fingerprint", desc: "hide service versions, MOTD/issue, anti port-scan", action: func() tea.Cmd { return push(bannerMenu(c)) }},
 		menuItem{label: "DNS records", desc: "Cloudflare zones and records", action: func() tea.Cmd { return push(cfMenu(c)) }},
@@ -102,6 +109,7 @@ func newHome(c *ctx) *homeScreen {
 		menuItem{label: "Automatic updates", desc: "unattended security updates", action: func() tea.Cmd { return push(updatesMenu(c)) }},
 		menuItem{label: "Kernel hardening", desc: "sysctl network/kernel knobs", action: func() tea.Cmd { return push(sysctlMenu(c)) }},
 		menuItem{label: "Security audit", desc: "score and findings", action: func() tea.Cmd { return push(auditScreen(c)) }},
+		menuItem{label: "Remote backups", desc: "rclone: back up folders to S3, B2, SFTP, Drive... on a schedule", action: func() tea.Cmd { return push(backupMenu(c)) }},
 		menuItem{label: "Backups & rollback", desc: "undo any change vpshield made", action: func() tea.Cmd { return push(backupsScreen(c)) }},
 		menuItem{label: "Activity log", desc: "commands run in this session", action: func() tea.Cmd { return push(logScreen(c)) }},
 		menuItem{label: "Quit", action: func() tea.Cmd { return tea.Quit }},
@@ -153,6 +161,7 @@ func (h *homeScreen) renderDash() string {
 		kv("allowed", truncate(ports, 38)),
 		kv("fail2ban", dot(d.f2bOn)+" "+onOff(d.f2bOn, fmt.Sprintf("%d jails, %d banned now", d.f2bJails, d.f2bBanned), "not running")),
 		kv("updates", dot(d.updOn)+" "+d.updMsg),
+		kv("admins", adminsCell(d.accounts)),
 	}
 	root := d.rootLogin
 	rootOK := root != "yes"
@@ -161,6 +170,7 @@ func (h *homeScreen) renderDash() string {
 		kv("root", dot(rootOK)+" "+root),
 		kv("password", dot(!d.passAuth)+" "+onOff(!d.passAuth, "disabled (keys only)", "enabled")),
 		kv("kernel", dot(d.kernOK == d.kernTotal)+fmt.Sprintf(" %d/%d sysctl groups hardened", d.kernOK, d.kernTotal)),
+		kv("backups", dot(d.backupOK)+" "+d.backupMsg),
 	}
 	left := strings.Join(col1, "\n")
 	right := strings.Join(col2, "\n")
@@ -168,9 +178,22 @@ func (h *homeScreen) renderDash() string {
 	if h.c.width < 100 {
 		body = left + "\n" + right
 	}
+	if d.accounts.OnlyRoot {
+		body += "\n\n" + sCrit.Render("⚠ only root can log in: create a personal admin user (Users & access)")
+	}
 	if d.deadman != nil {
 		body += "\n\n" + sCrit.Render(fmt.Sprintf("⚠ pending automatic rollback in %s: run 'vpshield confirm' to keep the change",
 			time.Until(d.deadman.Deadline).Round(time.Second)))
 	}
 	return sBox.Render(body)
+}
+
+func adminsCell(s users.Summary) string {
+	switch {
+	case s.OnlyRoot:
+		return dot(false) + " " + sCrit.Render("only root")
+	case len(s.Admins) == 0:
+		return dot(false) + " no sudo user"
+	}
+	return dot(true) + " " + truncate(strings.Join(s.Admins, ", "), 36)
 }

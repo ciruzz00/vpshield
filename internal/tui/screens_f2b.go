@@ -12,13 +12,15 @@ import (
 
 	"vpshield/internal/fail2ban"
 	"vpshield/internal/firewall"
+	"vpshield/internal/plan"
 	"vpshield/internal/system"
 )
 
 func f2bMenu(c *ctx) Screen {
 	return newMenu(c, "Fail2ban",
 		menuItem{label: "Jails & banned IPs", desc: "live status, unban / ban manually", action: func() tea.Cmd { return push(f2bJails(c)) }},
-		menuItem{label: "Configure (wizard)", desc: "ban policy, sshd jail, extra jails, whitelist, ban action", action: func() tea.Cmd { return push(f2bWizard(c)) }},
+		menuItem{label: "Configure (wizard)", desc: "edit ban policy, sshd jail, extra jails, whitelist (starts from the current config)", action: func() tea.Cmd { return push(f2bWizard(c)) }},
+		menuItem{label: "Edit config file", desc: "edit " + fail2ban.JailFile + " directly, validated before reload", action: func() tea.Cmd { return push(f2bEditForm(c)) }},
 		menuItem{label: "Log", desc: "last lines of " + fail2ban.LogFile, action: func() tea.Cmd {
 			return push(newText(c, "fail2ban log", func() string { return tail(fail2ban.LogFile, 300) }))
 		}},
@@ -29,7 +31,8 @@ func f2bMenu(c *ctx) Screen {
 					return "no vpshield jail file yet: run the wizard"
 				}
 				return s
-			}))
+			}, textKey{key: "e", help: "edit", fn: func() tea.Cmd { return push(f2bEditForm(c)) }},
+				textKey{key: "w", help: "wizard", fn: func() tea.Cmd { return push(f2bWizard(c)) }}))
 		}},
 		menuItem{label: "Unban everyone", desc: "clear all bans in all jails", action: func() tea.Cmd {
 			return push(confirmScreen(c, "Unban all", "Unban every IP in every jail?", "", func() tea.Cmd {
@@ -156,8 +159,15 @@ func f2bWizard(c *ctx) Screen {
 			def = "nftables-multiport"
 		}
 	}
-	cfg := fail2ban.Defaults(c.h, sshPort, def, banActions[def])
+	cfg, existing := fail2ban.Load(fail2ban.Defaults(c.h, sshPort, def, banActions[def]))
+	if existing && cfg.SSHPort != sshPort {
+		cfg.SSHPort = sshPort // follow the real sshd port
+	}
 	ignore := strings.Join(cfg.IgnoreIP, " ")
+	intro := "No vpshield config yet: recommended defaults are pre-selected."
+	if existing {
+		intro = "Current values loaded from " + fail2ban.JailFile + ": change what you need, the rest stays as it is."
+	}
 
 	var jailOpts []huh.Option[string]
 	for _, j := range fail2ban.Catalog {
@@ -175,7 +185,11 @@ func f2bWizard(c *ctx) Screen {
 		jailOpts = append(jailOpts, o)
 	}
 	var actOpts []huh.Option[string]
-	for _, a := range []string{"ufw", "firewallcmd-rich-rules", "nftables-multiport", "iptables-multiport"} {
+	acts := []string{"ufw", "firewallcmd-rich-rules", "nftables-multiport", "iptables-multiport"}
+	if _, known := banActions[cfg.BanAction]; !known && cfg.BanAction != "" {
+		acts = append(acts, cfg.BanAction)
+	}
+	for _, a := range acts {
 		label := a
 		if a == def {
 			label += "  ★ recommended"
@@ -190,7 +204,9 @@ func f2bWizard(c *ctx) Screen {
 
 	return newForm(c, "Fail2ban wizard", func() tea.Cmd {
 		cfg.IgnoreIP, _ = fail2ban.ParseIgnoreIP(ignore)
-		cfg.BanAllPorts = banActions[cfg.BanAction]
+		if all, known := banActions[cfg.BanAction]; known {
+			cfg.BanAllPorts = all
+		}
 		p := fail2ban.BuildPlan(c.h, cfg)
 		for _, j := range cfg.Jails {
 			if j == "portscan" && fw.Active() {
@@ -208,34 +224,34 @@ func f2bWizard(c *ctx) Screen {
 		return replace(newPlan(c, p, nil))
 	},
 		huh.NewGroup(
-			huh.NewNote().Title("1/4 · Ban policy").Description("An IP failing <maxretry> times within <findtime> is banned for <bantime>."),
-			huh.NewSelect[string]().Title("Ban time").Options(
+			huh.NewNote().Title("1/4 · Ban policy").Description(intro+"\nAn IP failing <maxretry> times within <findtime> is banned for <bantime>."),
+			huh.NewSelect[string]().Title("Ban time").Options(withCurrent(cfg.BanTime,
 				huh.NewOption("10 minutes", "10m"), huh.NewOption("1 hour (recommended)", "1h"), huh.NewOption("6 hours", "6h"),
 				huh.NewOption("1 day", "1d"), huh.NewOption("1 week", "1w"),
-			).Value(&cfg.BanTime),
-			huh.NewSelect[string]().Title("Find time (window)").Options(
+			)...).Value(&cfg.BanTime),
+			huh.NewSelect[string]().Title("Find time (window)").Options(withCurrent(cfg.FindTime,
 				huh.NewOption("5 minutes", "5m"), huh.NewOption("10 minutes (recommended)", "10m"), huh.NewOption("30 minutes", "30m"),
 				huh.NewOption("1 hour", "1h"), huh.NewOption("1 day", "1d"),
-			).Value(&cfg.FindTime),
-			huh.NewSelect[int]().Title("Max retries (default for all jails)").Options(
+			)...).Value(&cfg.FindTime),
+			huh.NewSelect[int]().Title("Max retries (default for all jails)").Options(withCurrent(cfg.MaxRetry,
 				huh.NewOption("3", 3), huh.NewOption("5 (recommended)", 5), huh.NewOption("10", 10),
-			).Value(&cfg.MaxRetry),
+			)...).Value(&cfg.MaxRetry),
 			huh.NewConfirm().Title("Incremental bans?").Description("each new ban of the same IP lasts twice as long").Value(&cfg.Increment),
-			huh.NewSelect[string]().Title("Max incremental ban").Options(
+			huh.NewSelect[string]().Title("Max incremental ban").Options(withCurrent(cfg.MaxBanTime,
 				huh.NewOption("1 week", "1w"), huh.NewOption("4 weeks", "4w"), huh.NewOption("1 year", "52w"),
-			).Value(&cfg.MaxBanTime),
+			)...).Value(&cfg.MaxBanTime),
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("2/4 · SSH jail").Description(fmt.Sprintf("Watches sshd on port %d (journal or auth log, auto-detected).", sshPort)),
-			huh.NewSelect[string]().Title("Detection mode").Options(
+			huh.NewSelect[string]().Title("Detection mode").Options(withCurrent(cfg.SSHMode,
 				huh.NewOption("aggressive: everything below (recommended)", "aggressive"),
 				huh.NewOption("normal: failed passwords / invalid users", "normal"),
 				huh.NewOption("ddos: pre-auth floods, dropped connections", "ddos"),
 				huh.NewOption("extra: normal + protocol errors", "extra"),
-			).Value(&cfg.SSHMode),
-			huh.NewSelect[int]().Title("SSH max retries").Options(
+			)...).Value(&cfg.SSHMode),
+			huh.NewSelect[int]().Title("SSH max retries").Options(withCurrent(cfg.SSHMaxRetry,
 				huh.NewOption("2", 2), huh.NewOption("3 (recommended)", 3), huh.NewOption("5", 5),
-			).Value(&cfg.SSHMaxRetry),
+			)...).Value(&cfg.SSHMaxRetry),
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("3/4 · Extra jails").Description("Jails for services not found on this host are pre-unselected: enabling them fails if their log is missing."),
@@ -250,4 +266,71 @@ func f2bWizard(c *ctx) Screen {
 			huh.NewSelect[string]().Title("Ban action").Description("how bans are enforced").Options(actOpts...).Value(&cfg.BanAction),
 		),
 	)
+}
+
+// withCurrent appends cur as an extra option when it is not one of the
+// presets, so loading a hand-edited value does not silently reset it.
+func withCurrent[T comparable](cur T, opts ...huh.Option[T]) []huh.Option[T] {
+	var zero T
+	if cur == zero {
+		return opts
+	}
+	for _, o := range opts {
+		if o.Value == cur {
+			return opts
+		}
+	}
+	return append(opts, huh.NewOption(fmt.Sprintf("%v (current)", cur), cur))
+}
+
+// f2bEditForm edits the jail file as text. The plan writes it, runs
+// fail2ban-client -t and reloads: a rejected file is rolled back.
+func f2bEditForm(c *ctx) Screen {
+	content := system.ReadFile(fail2ban.JailFile)
+	if content == "" {
+		fw := firewall.Detect(c.h, c.st)
+		act := fw.Fail2banAction()
+		content = fail2ban.Render(c.h, fail2ban.Defaults(c.h, currentSSHPort(c), act, banActions[act]))
+	}
+	orig := content
+	lines := c.height - 8
+	if lines < 6 {
+		lines = 6
+	}
+	return newForm(c, "Edit jail file", func() tea.Cmd {
+		if content == orig {
+			return pop()
+		}
+		p := &plan.Plan{Title: "Edit " + fail2ban.JailFile}
+		if !c.h.Has("fail2ban-client") {
+			p.Warn("fail2ban is not installed: the file is written but nothing enforces it (run the wizard to install)")
+		}
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		p.Add(plan.File(fail2ban.JailFile, content, 0o644))
+		if c.h.Has("fail2ban-client") {
+			p.Add(plan.Func("test configuration", "$ fail2ban-client -t", func(h *system.Host) (string, error) {
+				out, err := h.Run("fail2ban-client", "-t")
+				if err != nil && strings.Contains(strings.ToLower(out), "usage") {
+					return "fail2ban too old for -t, skipped", nil
+				}
+				if err != nil {
+					return out, fmt.Errorf("fail2ban rejected the file, it will be restored: %w", err)
+				}
+				return out, nil
+			}))
+			if fail2ban.Running(c.h) {
+				p.Add(plan.Cmd("reload fail2ban", "fail2ban-client", "reload"))
+			} else {
+				p.Add(plan.EnableService("fail2ban"))
+			}
+			p.RestoreHooks = append(p.RestoreHooks, []string{"fail2ban-client", "reload"})
+		}
+		return replace(newPlan(c, p, nil))
+	}, huh.NewGroup(
+		huh.NewText().Title(fail2ban.JailFile).
+			Description("ctrl+e opens $EDITOR · the wizard keeps the values it knows, other custom lines are dropped if you run it again").
+			Lines(lines).CharLimit(0).ShowLineNumbers(true).Value(&content),
+	))
 }

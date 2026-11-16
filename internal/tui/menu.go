@@ -26,6 +26,7 @@ type menuScreen struct {
 	onKey   func(k string) tea.Cmd // optional hook (used by the easter egg)
 	onFocus func()
 	status  string
+	offset  int // first visible item when the list is taller than the screen
 }
 
 func newMenu(c *ctx, title string, items ...menuItem) *menuScreen {
@@ -104,9 +105,29 @@ func (m *menuScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *menuScreen) View() string {
 	var b strings.Builder
+	used := 0
 	if m.header != nil {
-		b.WriteString(m.header())
+		hd := m.header()
+		b.WriteString(hd)
 		b.WriteString("\n\n")
+		used += strings.Count(hd, "\n") + 2
+	}
+	if m.status != "" {
+		used += 2
+	}
+	first, last := 0, len(m.items)
+	if avail := m.c.height - used; avail >= 3 && len(m.items) > avail {
+		rows := avail - 2 // room for the ↑/↓ markers
+		if m.cursor < m.offset {
+			m.offset = m.cursor
+		}
+		if m.cursor >= m.offset+rows {
+			m.offset = m.cursor - rows + 1
+		}
+		if m.offset > len(m.items)-rows {
+			m.offset = len(m.items) - rows
+		}
+		first, last = m.offset, m.offset+rows
 	}
 	labelW := 0
 	for _, it := range m.items {
@@ -114,7 +135,11 @@ func (m *menuScreen) View() string {
 			labelW = len(it.label)
 		}
 	}
-	for i, it := range m.items {
+	if first > 0 || last < len(m.items) {
+		b.WriteString(sMuted.Render(map[bool]string{true: "   ↑ more", false: ""}[first > 0]) + "\n")
+	}
+	for i := first; i < last; i++ {
+		it := m.items[i]
 		num := sMuted.Render(fmt.Sprintf("%2d.", i+1))
 		label := it.label + strings.Repeat(" ", labelW-len(it.label))
 		line := ""
@@ -130,6 +155,9 @@ func (m *menuScreen) View() string {
 			line += "  " + sMuted.Render(truncate(it.desc, m.c.width-labelW-24))
 		}
 		b.WriteString(line + "\n")
+	}
+	if first > 0 || last < len(m.items) {
+		b.WriteString(sMuted.Render(map[bool]string{true: "   ↓ more", false: ""}[last < len(m.items)]) + "\n")
 	}
 	if m.status != "" {
 		b.WriteString("\n" + m.status + "\n")

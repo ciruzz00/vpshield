@@ -145,6 +145,55 @@ func (h *Host) RunTimeout(t time.Duration, name string, args ...string) (string,
 	return out, err
 }
 
+// RunInput runs a mutating command feeding stdin. The input is never logged
+// (used for passwords: chpasswd).
+func (h *Host) RunInput(stdin string, name string, args ...string) (string, error) {
+	line := CmdString(name, args...) + " <<< (hidden input)"
+	if h.DryRun {
+		h.logf("[dry-run] %s", line)
+		return "[dry-run] " + line, nil
+	}
+	h.logf("$ %s", line)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, resolveBin(name), args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	s := strings.TrimRight(string(out), "\n")
+	if err != nil {
+		h.logf("  error: %v", err)
+		return s, fmt.Errorf("%s: %w: %s", name, err, lastLines(s, 3))
+	}
+	return s, nil
+}
+
+// RunMasked runs a mutating command whose arguments contain secrets: only
+// display is logged, and the secrets are scrubbed from the output.
+func (h *Host) RunMasked(display string, secrets []string, timeout time.Duration, name string, args ...string) (string, error) {
+	if h.DryRun {
+		h.logf("[dry-run] %s", display)
+		return "[dry-run] " + display, nil
+	}
+	h.logf("$ %s", display)
+	out, err := exe(timeout, name, args...)
+	if err != nil {
+		h.logf("  error: %s failed", name)
+		// the error may echo arguments: do not propagate them
+		return "", fmt.Errorf("%s failed: %s", display, lastLines(mask(out, secrets), 3))
+	}
+	return mask(out, secrets), nil
+}
+
+func mask(s string, secrets []string) string {
+	for _, x := range secrets {
+		if x != "" {
+			s = strings.ReplaceAll(s, x, "****")
+		}
+	}
+	return s
+}
+
 // Shell runs a mutating /bin/sh -c snippet.
 func (h *Host) Shell(script string) (string, error) {
 	return h.Run("/bin/sh", "-c", script)

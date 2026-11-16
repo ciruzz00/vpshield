@@ -2,9 +2,7 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,6 +13,7 @@ import (
 	"vpshield/internal/plan"
 	"vpshield/internal/sshd"
 	"vpshield/internal/system"
+	"vpshield/internal/users"
 )
 
 func sshMenu(c *ctx) Screen {
@@ -140,6 +139,10 @@ func sshHardenForm(c *ctx) Screen {
 		keyNote = "⚠ NO authorized_keys found: keep passwords ON or add a key first (SSH › Add authorized key)"
 		pass = true
 	}
+	rootNote := "no: only works once a personal admin user with sudo exists"
+	if us := users.Summarize(users.List()); us.OnlyRoot || len(us.Admins) == 0 {
+		rootNote = "⚠ no admin user with sudo yet: keep prohibit-password, create one in Users & access first"
+	}
 	return newForm(c, "SSH hardening", func() tea.Cmd {
 		want.PasswordAuth = pass
 		want.MaxAuthTries = maxTries
@@ -160,7 +163,7 @@ func sshHardenForm(c *ctx) Screen {
 		return replace(newPlan(c, p, nil))
 	},
 		huh.NewGroup(
-			huh.NewSelect[string]().Title("Root login").Options(
+			huh.NewSelect[string]().Title("Root login").Description(rootNote).Options(
 				huh.NewOption("prohibit-password: root only with keys (recommended)", "prohibit-password"),
 				huh.NewOption("no: root cannot log in, use sudo", "no"),
 				huh.NewOption("yes: root with password (insecure)", "yes"),
@@ -187,8 +190,9 @@ func sshHardenForm(c *ctx) Screen {
 	)
 }
 
-func sshKeyForm(c *ctx) Screen {
-	username := system.LoginUser()
+func sshKeyForm(c *ctx) Screen { return sshKeyFormFor(c, system.LoginUser()) }
+
+func sshKeyFormFor(c *ctx, username string) Screen {
 	var key string
 	return newForm(c, "Add authorized key", func() tea.Cmd {
 		k := strings.TrimSpace(key)
@@ -219,34 +223,5 @@ func sshKeyForm(c *ctx) Screen {
 }
 
 func addAuthorizedKey(h *system.Host, username, key string) (string, error) {
-	u, err := user.Lookup(username)
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(u.HomeDir, ".ssh")
-	file := filepath.Join(dir, "authorized_keys")
-	cur := system.ReadFile(file)
-	if strings.Contains(cur, strings.Join(strings.Fields(key)[:2], " ")) {
-		return "key already present", nil
-	}
-	if h.DryRun {
-		return "[dry-run] append to " + file, nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	content := cur
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	content += key + "\n"
-	if err := h.WriteFile(file, []byte(content), 0o600); err != nil {
-		return "", err
-	}
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	_ = os.Chown(dir, uid, gid)
-	_ = os.Chmod(dir, 0o700)
-	_ = os.Chown(file, uid, gid)
-	return "key added to " + file, nil
+	return users.AddAuthorizedKey(h, username, key)
 }

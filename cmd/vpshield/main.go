@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vpshield/internal/audit"
+	"vpshield/internal/backup"
 	"vpshield/internal/fail2ban"
 	"vpshield/internal/firewall"
 	"vpshield/internal/sshd"
@@ -29,6 +30,9 @@ Usage:
   vpshield rollback --list        list snapshots
   vpshield rollback <snapshot>    restore a snapshot
   vpshield prune --days N         delete snapshots older than N days
+  vpshield backup list            rclone backup jobs and their last run
+  vpshield backup run <job> [--quiet]
+                                  run a backup job now (used by cron)
   vpshield version
 
 --dry-run shows every plan and logs the commands without changing anything.
@@ -156,6 +160,8 @@ func subcommand(name string, args []string) int {
 		if d := system.ActiveDeadman(); d != nil {
 			fmt.Printf("PENDING   automatic rollback of %s in %s (vpshield confirm)\n", d.SnapshotID, time.Until(d.Deadline).Round(time.Second))
 		}
+	case "backup":
+		return backupCmd(args)
 	case "prune":
 		days := fs.Int("days", 30, "age in days")
 		fs.Parse(args)
@@ -186,4 +192,50 @@ func reorder(args []string) []string {
 		}
 	}
 	return append(flags, pos...)
+}
+
+func backupCmd(args []string) int {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	quiet := fs.Bool("quiet", false, "print errors only")
+	fs.Parse(reorder(args))
+	switch fs.Arg(0) {
+	case "list", "":
+		st := backup.LoadStatus()
+		jobs := backup.LoadJobs()
+		if len(jobs) == 0 {
+			fmt.Println("no backup jobs (create one in the TUI: Remote backups)")
+		}
+		for _, j := range jobs {
+			last := "never run"
+			if s, ok := st[j.ID]; ok {
+				last = fmt.Sprintf("%s %s (%s) %s", map[bool]string{true: "OK", false: "FAILED"}[s.OK], s.Time.Format("2006-01-02 15:04"), s.Duration, s.Message)
+			}
+			sched := j.Schedule
+			if sched == "" {
+				sched = "manual"
+			}
+			fmt.Printf("%-14s %-7s %-14s %s\n               → %s\n", j.ID, j.Mode, sched, last, j.Dest())
+		}
+	case "run":
+		if !needRoot() {
+			return 1
+		}
+		j, ok := backup.FindJob(fs.Arg(1))
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown backup job %q\n", fs.Arg(1))
+			return 1
+		}
+		msg, err := backup.Run(system.NewHost(false), j)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "backup %s failed: %v (log: %s)\n", j.ID, err, backup.LogFile(j.ID))
+			return 1
+		}
+		if !*quiet {
+			fmt.Println(msg)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: vpshield backup list | run <job> [--quiet]")
+		return 2
+	}
+	return 0
 }

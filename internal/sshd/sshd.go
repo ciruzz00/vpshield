@@ -14,6 +14,7 @@ import (
 	"vpshield/internal/firewall"
 	"vpshield/internal/plan"
 	"vpshield/internal/system"
+	"vpshield/internal/users"
 )
 
 const (
@@ -280,6 +281,9 @@ func BuildPlan(h *system.Host, fw firewall.Backend, cur, want Settings, o Option
 		}
 		if nonRoot == 0 && !want.PasswordAuth {
 			p.Warn("root login disabled but only root has an SSH key: create a sudo user with a key first")
+		}
+		if us := users.Summarize(users.List()); len(us.Admins) == 0 {
+			p.Warn("root login disabled but NO other account has sudo: you could log in but never become root again (Users & access › Create admin user)")
 		}
 	}
 	if len(want.AllowUsers) > 0 {

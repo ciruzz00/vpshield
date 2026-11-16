@@ -133,6 +133,106 @@ func Defaults(h *system.Host, sshPort int, banAction, banAll string) Config {
 	return c
 }
 
+// Load returns the configuration currently written in JailFile, using def
+// for anything the file does not set. ok is false when there is no file.
+func Load(def Config) (c Config, ok bool) {
+	s := system.ReadFile(JailFile)
+	if strings.TrimSpace(s) == "" {
+		return def, false
+	}
+	return ParseConfig(s, def), true
+}
+
+// ParseConfig reads a jail file written by Render (or edited by hand).
+func ParseConfig(content string, def Config) Config {
+	c := def
+	c.Jails = nil
+	c.Increment = false
+	section := ""
+	enabled := map[string]bool{}
+	sawMode := false
+	var lastKey string
+	for _, raw := range strings.Split(content, "\n") {
+		line := raw
+		if i := strings.IndexAny(line, "#;"); i == 0 || (i > 0 && (line[i-1] == ' ' || line[i-1] == '\t')) {
+			line = line[:i]
+		}
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			section = strings.TrimSpace(t[1 : len(t)-1])
+			lastKey = ""
+			continue
+		}
+		// continuation line (indented) extends the previous value
+		if (raw[0] == ' ' || raw[0] == '\t') && lastKey == "ignoreip" && section == "DEFAULT" && !strings.Contains(t, "=") {
+			if ips, err := ParseIgnoreIP(t); err == nil {
+				c.IgnoreIP = append(c.IgnoreIP, ips...)
+			}
+			continue
+		}
+		k, v, found := strings.Cut(t, "=")
+		if !found {
+			continue
+		}
+		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
+		lastKey = k
+		num := func(def int) int {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
+			return def
+		}
+		switch section {
+		case "DEFAULT":
+			switch k {
+			case "bantime":
+				c.BanTime = v
+			case "findtime":
+				c.FindTime = v
+			case "maxretry":
+				c.MaxRetry = num(c.MaxRetry)
+			case "bantime.increment":
+				c.Increment = v == "true" || v == "yes" || v == "1"
+			case "bantime.maxtime":
+				c.MaxBanTime = v
+			case "ignoreip":
+				if ips, err := ParseIgnoreIP(v); err == nil {
+					c.IgnoreIP = ips
+				}
+			case "banaction":
+				c.BanAction = v
+			case "banaction_allports":
+				c.BanAllPorts = v
+			}
+		case "sshd":
+			switch k {
+			case "port":
+				c.SSHPort = num(c.SSHPort)
+			case "mode":
+				c.SSHMode, sawMode = v, true
+			case "maxretry":
+				c.SSHMaxRetry = num(c.SSHMaxRetry)
+			}
+		default:
+			if k == "enabled" {
+				enabled[section] = v == "true" || v == "yes" || v == "1"
+			}
+		}
+	}
+	if !sawMode {
+		c.SSHMode = "normal" // fail2ban default when the jail sets no mode
+	}
+	for _, j := range Catalog {
+		if enabled[j.Name] {
+			c.Jails = append(c.Jails, j.ID)
+		}
+	}
+	return c
+}
+
 // PortscanFilter matches packets dropped by ufw, firewalld and the vpshield
 // nftables ruleset. Kernel log lines carry SRC=<ip>.
 const PortscanFilterFile = "/etc/fail2ban/filter.d/vpshield-portscan.conf"

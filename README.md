@@ -20,7 +20,8 @@ Every change is shown as a **plan** before it runs, executed inside a **snapshot
 |---|---|
 | **Firewall & ports** | ufw, firewalld or native nftables (auto-detected per distro). Default deny inbound, SSH always allowed first, service whitelist, open/close ports, per-IP rate limiting, view of what is really listening and whether it is exposed. Disables a second active firewall to avoid conflicts. |
 | **SSH** | Port change (e.g. 22 → 2222) handling firewall, SELinux (`semanage`), Ubuntu socket activation and `sshd -t` validation. Hardening wizard (root login, passwords, MaxAuthTries, grace time, idle timeout, forwarding, AllowUsers). Lockout guards: warns when no `authorized_keys` exist, when AllowUsers misses you, etc. Add an authorized key from the TUI. |
-| **Fail2ban** | Interactive wizard: ban/find time, retries, incremental bans, sshd mode (normal/aggressive/ddos/extra), extra jails auto-detected (recidive, nginx, apache, postfix, dovecot), whitelist pre-filled with your current IP, ban action matched to the firewall. Live view of jails and banned IPs, unban/ban, log viewer. |
+| **Users & access** | Internal security: warns when root is the only account that can log in, creates a personal admin user (sudo group, password, SSH keys copied from root), lists accounts with sudo / password / key status, locks accounts or the root password, sudo policy (command log, `use_pty`, timeout) validated with `visudo`. Disabling root login without another admin is flagged. |
+| **Fail2ban** | Interactive wizard (starts from the current config, so it edits instead of resetting), or edit the jail file directly with validation (`fail2ban-client -t`) and automatic rollback. ban/find time, retries, incremental bans, sshd mode (normal/aggressive/ddos/extra), extra jails auto-detected (recidive, nginx, apache, postfix, dovecot), whitelist pre-filled with your current IP, ban action matched to the firewall. Live view of jails and banned IPs, unban/ban, log viewer. |
 | **Port-scan protection** | `vpshield-portscan` jail: IPs that hit too many closed ports (dropped by ufw / firewalld / nftables) get banned on all ports. |
 | **Banners & fingerprint** | Hides the distro suffix in the SSH identification string, `server_tokens off` (nginx), `ServerTokens Prod` (Apache), neutral Postfix greeting, disables dynamic MOTD, cleans `/etc/issue*`, optional pre-login legal warning. |
 | **DNS records** | Cloudflare API (scoped token): list/add/edit/delete records, "point a name to this server" (detects public IPv4/IPv6), SPF / DMARC / CAA helpers. |
@@ -29,6 +30,7 @@ Every change is shown as a **plan** before it runs, executed inside a **snapshot
 | **Automatic updates** | unattended-upgrades (Debian/Ubuntu), dnf-automatic (RHEL family), apk cron (Alpine), notify-only on Arch. Security-only and reboot window options. |
 | **Kernel hardening** | Curated sysctl groups (SYN cookies, rp_filter, redirects, kptr/dmesg restrict, BPF, ptrace...) with current vs target view. IP-forwarding knob is skipped when Docker/WireGuard/k8s are detected. |
 | **Security audit** | Score plus findings: SSH, firewall, fail2ban, updates, publicly listening risky services (Redis, MySQL, Docker API...), UID 0 accounts, empty passwords, `.ssh` permissions, sysctl, world-writable files, SUID. Can be saved daily via cron. |
+| **Remote backups (rclone)** | Add destinations from the TUI: S3 compatible (Cloudflare R2, AWS, Wasabi, MinIO...), Backblaze B2, SFTP, WebDAV/Nextcloud, Google Drive, Dropbox, local disk, plus client-side encryption (crypt). Jobs: dated `.tar.gz` archives streamed without temp files, or a mirror with versioned changes; retention, excludes, pre-backup command (e.g. database dump), bandwidth limit, cron schedule, logs, restore into a separate folder. |
 | **Backups & rollback** | Every plan snapshots the files it touches. Restore any snapshot from the TUI or CLI. |
 
 ## Supported distributions
@@ -72,6 +74,8 @@ vpshield confirm                keep a pending SSH change
 vpshield rollback --list        list snapshots
 vpshield rollback <snapshot>    restore a snapshot
 vpshield prune --days 30        delete old snapshots
+vpshield backup list            backup jobs and last result
+vpshield backup run <job>       run a backup job now (used by cron)
 ```
 
 ## Safety model
@@ -91,9 +95,11 @@ vpshield prune --days 30        delete old snapshots
 | `/etc/nftables.conf` / `/etc/nftables.nft` | nftables backend (table `inet vpshield`) |
 | `/etc/sysctl.d/99-vpshield.conf` | kernel hardening |
 | `/etc/cron.d/vpshield` or a marked block in `/etc/crontabs/root` | cron jobs |
-| `/etc/vpshield/` | state and the Cloudflare token (0600) |
+| `/etc/vpshield/` | state, backup jobs and the Cloudflare token (0600) |
+| `/etc/sudoers.d/00-vpshield-defaults`, `10-vpshield-admins` | sudo policy, admin group rule |
+| rclone's own `rclone.conf` (root) | backup remotes (credentials obscured by rclone) |
 | `/var/lib/vpshield/backups/` | snapshots |
-| `/var/log/vpshield/` | action log, audit reports |
+| `/var/log/vpshield/` | action log, audit reports, `backup-<job>.log` |
 
 ## Limitations
 

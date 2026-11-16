@@ -11,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"vpshield/internal/backup"
 	"vpshield/internal/fail2ban"
 	"vpshield/internal/firewall"
 	"vpshield/internal/sshd"
 	"vpshield/internal/sysctl"
 	"vpshield/internal/system"
 	"vpshield/internal/updates"
+	"vpshield/internal/users"
 )
 
 type Severity int
@@ -173,6 +175,32 @@ func Run(h *system.Host, st *system.State) Report {
 		f.Close()
 		add(Info, "accounts", "accounts with a login shell: "+strings.Join(shells, ", "), "")
 	}
+	// --- internal security: who can become root
+	us := users.Summarize(users.List())
+	switch {
+	case us.OnlyRoot:
+		add(Warn, "accounts", "root is the only account that can log in",
+			"work as a personal user with sudo: Users & access › Create admin user, then PermitRootLogin no")
+	case len(us.Admins) == 0:
+		add(Info, "accounts", "no personal account has sudo", "administration still requires logging in as root")
+	default:
+		add(OK, "accounts", "admins with sudo: "+strings.Join(us.Admins, ", "), "")
+		if eff := sshd.Effective(h); eff["permitrootlogin"] != "" && eff["permitrootlogin"] != "no" {
+			add(Info, "accounts", "root can still log in over SSH although admin users exist", "SSH › Hardening › Root login = no")
+		}
+	}
+	for _, u := range us.NoPasswd {
+		add(Warn, "accounts", "passwordless sudo for "+u, "a stolen key or session of "+u+" is instantly root")
+	}
+	if system.IsRoot() && h.Has("sudo") {
+		cur := users.CurrentSudoDefaults()
+		if len(cur) == 0 {
+			add(Info, "accounts", "sudo commands are not logged to a file", "Users & access › Sudo policy")
+		}
+	}
+	if st, err := os.Stat("/etc/shadow"); err == nil && st.Mode().Perm()&0o004 != 0 {
+		add(Crit, "accounts", fmt.Sprintf("/etc/shadow is world readable (%o)", st.Mode().Perm()), "chmod 640 /etc/shadow")
+	}
 	if f, err := os.Open("/etc/shadow"); err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
@@ -193,6 +221,27 @@ func Run(h *system.Host, st *system.State) Report {
 		}
 		if st, err := os.Stat(filepath.Join(home, ".ssh", "authorized_keys")); err == nil && st.Mode().Perm()&0o022 != 0 {
 			add(Warn, "accounts", fmt.Sprintf("%s/.ssh/authorized_keys writable by others (%o)", home, st.Mode().Perm()), "chmod 600")
+		}
+	}
+
+	// --- backups
+	jobs := backup.LoadJobs()
+	if len(jobs) == 0 {
+		add(Warn, "backups", "no off-server backups configured", "Remote backups › New backup job (rclone)")
+	} else {
+		bst := backup.LoadStatus()
+		for _, j := range jobs {
+			s, ok := bst[j.ID]
+			switch {
+			case !ok:
+				add(Warn, "backups", "backup "+j.ID+" never ran", "")
+			case !s.OK:
+				add(Warn, "backups", "backup "+j.ID+" failed on "+s.Time.Format("2006-01-02 15:04"), s.Message)
+			case j.Schedule != "" && time.Since(s.Time) > 8*24*time.Hour:
+				add(Warn, "backups", "backup "+j.ID+" last succeeded "+s.Time.Format("2006-01-02"), "check the cron job and "+backup.LogFile(j.ID))
+			default:
+				add(OK, "backups", "backup "+j.ID+" ok ("+s.Time.Format("2006-01-02 15:04")+")", "")
+			}
 		}
 	}
 

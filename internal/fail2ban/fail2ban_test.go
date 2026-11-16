@@ -53,3 +53,24 @@ func TestRender(t *testing.T) {
 		}
 	}
 }
+
+func TestParseConfigRoundTrip(t *testing.T) {
+	h := &system.Host{Distro: system.Distro{Family: system.FamilyDebian, Init: system.InitSystemd}}
+	want := Config{BanTime: "6h", FindTime: "30m", MaxRetry: 3, Increment: true, MaxBanTime: "52w",
+		IgnoreIP: []string{"127.0.0.1/8", "::1", "203.0.113.9"}, BanAction: "nftables-multiport", BanAllPorts: "nftables-allports",
+		SSHPort: 2222, SSHMode: "ddos", SSHMaxRetry: 2, Jails: []string{"recidive", "postfix"}}
+	def := Config{BanTime: "1h", FindTime: "10m", MaxRetry: 5, MaxBanTime: "4w", SSHPort: 22, SSHMode: "aggressive", SSHMaxRetry: 3}
+	got := ParseConfig(Render(h, want), def)
+	if got.BanTime != "6h" || got.FindTime != "30m" || got.MaxRetry != 3 || !got.Increment || got.MaxBanTime != "52w" ||
+		got.BanAction != want.BanAction || got.BanAllPorts != want.BanAllPorts || got.SSHPort != 2222 ||
+		got.SSHMode != "ddos" || got.SSHMaxRetry != 2 || strings.Join(got.IgnoreIP, " ") != strings.Join(want.IgnoreIP, " ") ||
+		strings.Join(got.Jails, ",") != "recidive,postfix" {
+		t.Fatalf("round trip mismatch:\n%+v", got)
+	}
+
+	hand := "[DEFAULT]\nbantime = 2h ; comment\nignoreip = 127.0.0.1/8\n    10.0.0.0/8\n[sshd]\nenabled = true\n[nginx-botsearch]\nenabled = false\n"
+	got = ParseConfig(hand, def)
+	if got.BanTime != "2h" || got.Increment || got.SSHMode != "normal" || len(got.Jails) != 0 || len(got.IgnoreIP) != 2 {
+		t.Fatalf("hand-written parse: %+v", got)
+	}
+}
